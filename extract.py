@@ -4,7 +4,17 @@ import traceback
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from tkinter import Tk, filedialog, messagebox
+from tkinter import (
+    Tk,
+    Toplevel,
+    StringVar,
+    BooleanVar,
+    filedialog,
+    messagebox,
+    Label,
+    Button
+)
+from tkinter import ttk
 
 import pdfplumber
 from openpyxl import Workbook
@@ -15,7 +25,6 @@ from openpyxl.styles import (
     PatternFill,
     Side
 )
-from openpyxl.utils import get_column_letter
 
 
 # ============================================================
@@ -23,10 +32,7 @@ from openpyxl.utils import get_column_letter
 # ============================================================
 
 def application_directory() -> Path:
-    """
-    Возвращает папку, где находится Extract.exe
-    или исходный файл extract.py.
-    """
+    """Папка, где находится EXE или extract.py."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
 
@@ -34,10 +40,7 @@ def application_directory() -> Path:
 
 
 def clean_spaces(value: str) -> str:
-    """
-    Убирает лишние пробелы, неразрывные пробелы
-    и переносы строк.
-    """
+    """Убирает повторяющиеся пробелы и переносы."""
     if not value:
         return ""
 
@@ -49,33 +52,27 @@ def clean_spaces(value: str) -> str:
     return value.strip()
 
 
-def normalize_text(text: str) -> str:
-    """
-    Нормализует текст для поиска.
-    """
-    if not text:
+def normalize_text(value: str) -> str:
+    """Нормализует текст для регулярных выражений."""
+    if not value:
         return ""
 
-    text = text.replace("\u00a0", " ")
-    text = text.replace("–", "-")
-    text = text.replace("—", "-")
-    text = text.replace("−", "-")
-    text = re.sub(r"[ \t]+", " ", text)
+    value = value.replace("\u00a0", " ")
+    value = value.replace("–", "-")
+    value = value.replace("—", "-")
+    value = value.replace("−", "-")
+    value = re.sub(r"[ \t]+", " ", value)
 
-    return text
+    return value
 
 
 def digits_only(value: str) -> str:
-    """
-    Оставляет в строке только цифры.
-    """
+    """Оставляет только цифры."""
     return re.sub(r"\D", "", value or "")
 
 
 def normalize_money(value: str) -> str:
-    """
-    Приводит денежное значение к виду 12345.67.
-    """
+    """Приводит сумму к формату 12345.67."""
     value = value.strip()
     value = value.replace("\u00a0", "")
     value = value.replace(" ", "")
@@ -85,95 +82,299 @@ def normalize_money(value: str) -> str:
 
 
 def parse_decimal(value: str):
-    """
-    Преобразует строку в Decimal.
-    """
-    normalized = normalize_money(value)
-
+    """Преобразует строку в Decimal."""
     try:
-        return Decimal(normalized)
+        return Decimal(normalize_money(value))
     except (InvalidOperation, ValueError):
         return None
 
 
 def normalize_date(day: str, month: str, year: str) -> str:
-    """
-    Проверяет дату и возвращает её в формате ДД.ММ.ГГГГ.
-    """
+    """Возвращает корректную дату в формате ДД.ММ.ГГГГ."""
     try:
-        date_value = datetime(
+        result = datetime(
             int(year),
             int(month),
             int(day)
         )
 
-        return date_value.strftime("%d.%m.%Y")
+        return result.strftime("%d.%m.%Y")
 
     except (ValueError, TypeError):
         return ""
 
 
-def convert_date_string(value: str) -> str:
-    """
-    Преобразует:
-    03-08-2026
-    03/08/2026
-    03.08.2026
+def create_border() -> Border:
+    """Тонкая граница Excel."""
+    side = Side(style="thin", color="000000")
 
-    в 03.08.2026.
-    """
-    match = re.search(
-        r"\b(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})\b",
-        value or ""
+    return Border(
+        left=side,
+        right=side,
+        top=side,
+        bottom=side
     )
 
-    if not match:
-        return ""
 
-    return normalize_date(
-        match.group(1),
-        match.group(2),
-        match.group(3)
+# ============================================================
+# РАБОТА СО СЛОВАМИ PDF
+# ============================================================
+
+def get_word_text(word: dict) -> str:
+    return str(word.get("text", "")).strip()
+
+
+def get_word_x0(word: dict) -> float:
+    return float(word.get("x0", 0))
+
+
+def get_word_x1(word: dict) -> float:
+    return float(word.get("x1", 0))
+
+
+def get_word_top(word: dict) -> float:
+    return float(word.get("top", 0))
+
+
+def get_word_bottom(word: dict) -> float:
+    return float(word.get("bottom", 0))
+
+
+def extract_page_words(page) -> list[dict]:
+    """
+    Извлекает отдельные слова и отдельные цифры.
+
+    keep_blank_chars=False позволяет получать цифры,
+    находящиеся в отдельных квадратных полях.
+    """
+    return page.extract_words(
+        x_tolerance=1,
+        y_tolerance=2,
+        keep_blank_chars=False,
+        use_text_flow=False
+    ) or []
+
+
+def group_words_into_lines(
+    words: list[dict],
+    tolerance: float = 4
+) -> list[list[dict]]:
+    """Объединяет слова в визуальные строки."""
+    if not words:
+        return []
+
+    sorted_words = sorted(
+        words,
+        key=lambda item: (
+            get_word_top(item),
+            get_word_x0(item)
+        )
     )
+
+    lines: list[list[dict]] = []
+
+    for word in sorted_words:
+        word_top = get_word_top(word)
+
+        matching_line = None
+
+        for line in lines:
+            line_top = sum(
+                get_word_top(item)
+                for item in line
+            ) / len(line)
+
+            if abs(word_top - line_top) <= tolerance:
+                matching_line = line
+                break
+
+        if matching_line is None:
+            lines.append([word])
+        else:
+            matching_line.append(word)
+
+    for line in lines:
+        line.sort(key=get_word_x0)
+
+    lines.sort(
+        key=lambda line: min(
+            get_word_top(item)
+            for item in line
+        )
+    )
+
+    return lines
+
+
+def join_words_preserving_lines(words: list[dict]) -> str:
+    """
+    Объединяет несколько визуальных строк.
+
+    Это исправляет наименования организаций,
+    которые занимают две или больше строк.
+    """
+    lines = group_words_into_lines(words)
+
+    text_lines = []
+
+    for line in lines:
+        line_text = " ".join(
+            get_word_text(item)
+            for item in line
+            if get_word_text(item)
+        )
+
+        line_text = clean_spaces(line_text)
+
+        if line_text:
+            text_lines.append(line_text)
+
+    return clean_spaces(" ".join(text_lines))
+
+
+def find_code_word(
+    words: list[dict],
+    code: str,
+    left_half_only: bool,
+    page_width: float
+):
+    """
+    Ищет служебный код поля формы: 201, 202, 203, 206 и т.д.
+    """
+    candidates = []
+
+    for word in words:
+        if digits_only(get_word_text(word)) != code:
+            continue
+
+        if left_half_only and get_word_x0(word) > page_width * 0.55:
+            continue
+
+        candidates.append(word)
+
+    if not candidates:
+        return None
+
+    return sorted(
+        candidates,
+        key=lambda item: (
+            get_word_top(item),
+            get_word_x0(item)
+        )
+    )[0]
+
+
+def words_in_rectangle(
+    words: list[dict],
+    x0: float,
+    x1: float,
+    top: float,
+    bottom: float
+) -> list[dict]:
+    """Возвращает слова внутри заданной области."""
+    result = []
+
+    for word in words:
+        word_center_x = (
+            get_word_x0(word)
+            + get_word_x1(word)
+        ) / 2
+
+        word_center_y = (
+            get_word_top(word)
+            + get_word_bottom(word)
+        ) / 2
+
+        if (
+            x0 <= word_center_x <= x1
+            and top <= word_center_y <= bottom
+        ):
+            result.append(word)
+
+    return result
+
+
+def remove_field_labels(value: str) -> str:
+    """Удаляет служебные подписи формы из результата."""
+    patterns = [
+        r"^\s*202\s*",
+        r"^\s*Ф\.?\s*И\.?\s*О\.?\s*ИП\s*/\s*",
+        r"^\s*Наименование\s+организации\s*:\s*",
+        r"^\s*Ф\.?\s*И\.?\s*О\.?\s*ИП\s*/\s*"
+        r"Наименование\s+организации\s*:\s*"
+    ]
+
+    for pattern in patterns:
+        value = re.sub(
+            pattern,
+            "",
+            value,
+            flags=re.IGNORECASE
+        )
+
+    return clean_spaces(value)
 
 
 # ============================================================
 # ЧТЕНИЕ PDF
 # ============================================================
 
-def extract_pdf_text(pdf_path: Path) -> tuple[str, str]:
+def extract_pdf_data(pdf_path: Path):
     """
-    Извлекает текст двумя способами:
-
-    ordinary_text — обычный текст;
-    layout_text — текст с приблизительным сохранением расположения.
+    Возвращает:
+    - обычный текст;
+    - layout-текст;
+    - первую страницу;
+    - слова первой страницы.
     """
     ordinary_parts = []
     layout_parts = []
+    first_page = None
+    first_page_words = []
 
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            ordinary_text = page.extract_text(
+    pdf = pdfplumber.open(pdf_path)
+
+    try:
+        for page_number, page in enumerate(pdf.pages):
+            ordinary = page.extract_text(
                 x_tolerance=2,
                 y_tolerance=3
             )
 
-            layout_text = page.extract_text(
+            layout = page.extract_text(
                 x_tolerance=2,
                 y_tolerance=3,
                 layout=True
             )
 
-            if ordinary_text:
-                ordinary_parts.append(ordinary_text)
+            if ordinary:
+                ordinary_parts.append(ordinary)
 
-            if layout_text:
-                layout_parts.append(layout_text)
+            if layout:
+                layout_parts.append(layout)
 
-    return (
-        "\n".join(ordinary_parts),
-        "\n".join(layout_parts)
-    )
+            if page_number == 0:
+                first_page = page
+                first_page_words = extract_page_words(page)
+
+        ordinary_text = "\n".join(ordinary_parts)
+        layout_text = "\n".join(layout_parts)
+
+        # Возвращаем размеры и слова, а не объект page,
+        # потому что PDF далее закрывается.
+        page_info = None
+
+        if first_page is not None:
+            page_info = {
+                "width": float(first_page.width),
+                "height": float(first_page.height),
+                "words": first_page_words
+            }
+
+        return ordinary_text, layout_text, page_info
+
+    finally:
+        pdf.close()
 
 
 # ============================================================
@@ -181,14 +382,14 @@ def extract_pdf_text(pdf_path: Path) -> tuple[str, str]:
 # ============================================================
 
 def extract_invoice_number(text: str) -> str:
-    """
-    Извлекает номер счета-фактуры из поля 102.
-    """
     normalized = normalize_text(text)
 
     patterns = [
-        r"102\s*Номер\s*:\s*([0-9]{4,}-[0-9]{3}-[0-9]{5,})",
+        r"102\s*(?:Номер|НОМЕР)\s*:\s*"
+        r"([0-9]{4,}-[0-9]{3}-[0-9]{5,})",
+
         r"\b([0-9]{7}-[0-9]{3}-[0-9]{8})\b",
+
         r"\b([0-9]{4,}-[0-9]{3}-[0-9]{5,})\b"
     ]
 
@@ -206,463 +407,14 @@ def extract_invoice_number(text: str) -> str:
 
 
 # ============================================================
-# ИНН ПОСТАВЩИКА — УСИЛЕННАЯ ПРОВЕРКА
-# ============================================================
-
-def is_valid_supplier_inn(value: str) -> bool:
-    """
-    Проверяет формат ИНН поставщика.
-
-    В обрабатываемых ЭСФ ИНН обычно состоит из 14 цифр.
-    Допускается диапазон 10–16 цифр для совместимости,
-    но приоритет всегда отдаётся 14-значному значению.
-    """
-    inn = digits_only(value)
-
-    if not inn:
-        return False
-
-    if len(inn) < 10 or len(inn) > 16:
-        return False
-
-    if inn == "0" * len(inn):
-        return False
-
-    return True
-
-
-def extract_supplier_inn_strict(text: str) -> str:
-    """
-    Основной способ.
-
-    Ищет цифры непосредственно после:
-    201 Поставщик ИНН:
-    """
-    normalized = normalize_text(text)
-
-    patterns = [
-        # Нормальное извлечение:
-        # 201 Поставщик ИНН: 03004202410293
-        r"201\s+Поставщик\s+ИНН\s*:\s*(\d{10,16})",
-
-        # Между цифрами могли появиться пробелы:
-        r"201\s+Поставщик\s+ИНН\s*:\s*((?:\d[\s]*){10,16})",
-
-        # Код 201 может оказаться на соседней позиции:
-        r"\b201\b.{0,80}?Поставщик\s+ИНН\s*:\s*((?:\d[\s]*){10,16})"
-    ]
-
-    for pattern in patterns:
-        match = re.search(
-            pattern,
-            normalized,
-            re.IGNORECASE | re.DOTALL
-        )
-
-        if match:
-            candidate = digits_only(match.group(1))
-
-            if is_valid_supplier_inn(candidate):
-                return candidate
-
-    return ""
-
-
-def extract_supplier_inn_from_section(text: str) -> str:
-    """
-    Резервный способ.
-
-    Анализирует участок между заголовком раздела реквизитов
-    и полем покупателя. Это позволяет не перепутать ИНН
-    поставщика с ИНН покупателя.
-    """
-    normalized = normalize_text(text)
-
-    start_match = re.search(
-        r"Раздел\s*1.*?Реквизиты\s+поставщика\s+и\s+покупателя",
-        normalized,
-        re.IGNORECASE | re.DOTALL
-    )
-
-    start_position = start_match.end() if start_match else 0
-
-    supplier_marker = re.search(
-        r"201\s+Поставщик\s+ИНН",
-        normalized[start_position:],
-        re.IGNORECASE
-    )
-
-    if not supplier_marker:
-        return ""
-
-    supplier_start = (
-        start_position
-        + supplier_marker.start()
-    )
-
-    buyer_marker = re.search(
-        r"301\s+Покупатель\s+ИНН",
-        normalized[supplier_start:],
-        re.IGNORECASE
-    )
-
-    if buyer_marker:
-        supplier_end = (
-            supplier_start
-            + buyer_marker.start()
-        )
-    else:
-        supplier_end = supplier_start + 300
-
-    fragment = normalized[
-        supplier_start:supplier_end
-    ]
-
-    candidates = re.findall(
-        r"(?<!\d)\d{10,16}(?!\d)",
-        fragment
-    )
-
-    valid_candidates = [
-        digits_only(candidate)
-        for candidate in candidates
-        if is_valid_supplier_inn(candidate)
-    ]
-
-    # Сначала предпочитаем 14-значный ИНН.
-    for candidate in valid_candidates:
-        if len(candidate) == 14:
-            return candidate
-
-    if valid_candidates:
-        return valid_candidates[0]
-
-    # Резервный поиск для цифр с пробелами.
-    spaced_candidates = re.findall(
-        r"(?<!\d)(?:\d[\s]*){10,16}(?!\d)",
-        fragment
-    )
-
-    for candidate in spaced_candidates:
-        candidate_digits = digits_only(candidate)
-
-        if (
-            is_valid_supplier_inn(candidate_digits)
-            and len(candidate_digits) == 14
-        ):
-            return candidate_digits
-
-    return ""
-
-
-def extract_supplier_inn_by_coordinates(
-    pdf_path: Path
-) -> str:
-    """
-    Дополнительный резервный способ.
-
-    Использует слова первой страницы и ищет значение,
-    расположенное рядом с надписью «Поставщик ИНН».
-
-    Это помогает, если обычное извлечение текста
-    смешало колонки поставщика и покупателя.
-    """
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            if not pdf.pages:
-                return ""
-
-            page = pdf.pages[0]
-
-            words = page.extract_words(
-                x_tolerance=2,
-                y_tolerance=3,
-                keep_blank_chars=False,
-                use_text_flow=False
-            )
-
-            if not words:
-                return ""
-
-            # Ищем строку, где присутствуют слова
-            # "Поставщик" и "ИНН".
-            for index, word in enumerate(words):
-                word_text = word.get("text", "").lower()
-
-                if "поставщик" not in word_text:
-                    continue
-
-                current_top = float(word.get("top", 0))
-                current_bottom = float(word.get("bottom", 0))
-
-                nearby_words = []
-
-                for candidate in words:
-                    candidate_top = float(
-                        candidate.get("top", 0)
-                    )
-                    candidate_bottom = float(
-                        candidate.get("bottom", 0)
-                    )
-
-                    same_line = (
-                        abs(candidate_top - current_top) <= 8
-                        or abs(
-                            candidate_bottom
-                            - current_bottom
-                        ) <= 8
-                    )
-
-                    # Берём значения справа от слова
-                    # "Поставщик", но только в левой части
-                    # формы, чтобы не захватить покупателя.
-                    if (
-                        same_line
-                        and float(candidate.get("x0", 0))
-                        >= float(word.get("x0", 0))
-                        and float(candidate.get("x0", 0))
-                        < page.width * 0.58
-                    ):
-                        nearby_words.append(candidate)
-
-                nearby_words.sort(
-                    key=lambda item: float(
-                        item.get("x0", 0)
-                    )
-                )
-
-                line_text = " ".join(
-                    item.get("text", "")
-                    for item in nearby_words
-                )
-
-                candidates = re.findall(
-                    r"\d{10,16}",
-                    digits_only_with_separators(line_text)
-                )
-
-                for candidate in candidates:
-                    if (
-                        is_valid_supplier_inn(candidate)
-                        and len(candidate) == 14
-                    ):
-                        return candidate
-
-    except Exception:
-        return ""
-
-    return ""
-
-
-def digits_only_with_separators(value: str) -> str:
-    """
-    Удаляет буквы, но сохраняет группы цифр разделёнными пробелом.
-    """
-    value = re.sub(r"[^\d]+", " ", value or "")
-    value = re.sub(r"\s+", " ", value)
-
-    return value.strip()
-
-
-def extract_supplier_inn(
-    ordinary_text: str,
-    layout_text: str,
-    pdf_path: Path
-) -> tuple[str, str]:
-    """
-    Последовательно применяет несколько способов определения ИНН.
-
-    Возвращает:
-    (ИНН, способ определения)
-    """
-    combined_text = (
-        ordinary_text
-        + "\n"
-        + layout_text
-    )
-
-    inn = extract_supplier_inn_strict(combined_text)
-
-    if inn:
-        return inn, "ИНН найден по полю 201"
-
-    inn = extract_supplier_inn_from_section(
-        ordinary_text
-    )
-
-    if inn:
-        return inn, "ИНН найден в разделе поставщика"
-
-    inn = extract_supplier_inn_from_section(
-        layout_text
-    )
-
-    if inn:
-        return inn, "ИНН найден в layout-тексте"
-
-    inn = extract_supplier_inn_by_coordinates(
-        pdf_path
-    )
-
-    if inn:
-        return inn, "ИНН найден по координатам"
-
-    return "", "ИНН поставщика не найден"
-
-
-# ============================================================
-# НАИМЕНОВАНИЕ ПОСТАВЩИКА
-# ============================================================
-
-def simplify_organization_name(name: str) -> str:
-    """
-    Преобразует полную организационно-правовую форму
-    в привычное сокращение.
-    """
-    name = clean_spaces(name)
-
-    replacements = [
-        (
-            r"^Общество\s+с\s+ограниченной\s+ответственностью\s*",
-            'ООО '
-        ),
-        (
-            r"^Открытое\s+акционерное\s+общество\s*",
-            "ОАО "
-        ),
-        (
-            r"^Закрытое\s+акционерное\s+общество\s*",
-            "ЗАО "
-        ),
-        (
-            r"^Индивидуальный\s+предприниматель\s*",
-            "ИП "
-        )
-    ]
-
-    for pattern, replacement in replacements:
-        name = re.sub(
-            pattern,
-            replacement,
-            name,
-            flags=re.IGNORECASE
-        )
-
-    return clean_spaces(name)
-
-
-def extract_supplier_name(text: str) -> str:
-    """
-    Извлекает наименование поставщика из левой части формы.
-    """
-    normalized = normalize_text(text)
-
-    patterns = [
-        (
-            r"201\s+Поставщик\s+ИНН\s*:\s*"
-            r"(?:\d[\s]*){10,16}"
-            r".{0,250}?"
-            r"Ф\.?\s*И\.?\s*О\.?\s*ИП\s*/\s*"
-            r"Наименование\s+организации\s*:\s*"
-            r"(.+?)"
-            r"(?=\s+202\b|\s+302\b|\s+203\b|"
-            r"\s+Филиал\s+поставщика)"
-        ),
-        (
-            r"Ф\.?\s*И\.?\s*О\.?\s*ИП\s*/\s*"
-            r"Наименование\s+организации\s*:\s*"
-            r"(.+?)"
-            r"(?=\s+202\b|\s+302\b|\s+203\b|"
-            r"\s+Филиал\s+поставщика)"
-        )
-    ]
-
-    for pattern in patterns:
-        match = re.search(
-            pattern,
-            normalized,
-            re.IGNORECASE | re.DOTALL
-        )
-
-        if match:
-            supplier = clean_spaces(match.group(1))
-
-            # Если в результат попала метка правой колонки,
-            # обрезаем её.
-            supplier = re.split(
-                r"\b302\b|Ф\.?\s*И\.?\s*О\.?\s*ИП\s*/",
-                supplier,
-                maxsplit=1,
-                flags=re.IGNORECASE
-            )[0]
-
-            supplier = clean_spaces(supplier)
-
-            if supplier:
-                return simplify_organization_name(
-                    supplier
-                )
-
-    return ""
-
-
-# ============================================================
-# КОД НАЛОГОВОГО ОРГАНА
-# ============================================================
-
-def extract_tax_office_code(text: str) -> str:
-    """
-    Извлекает код налогового органа поставщика.
-
-    Пример:
-    Код и наименование налогового органа:
-    004 - УГНС по Первомайскому району
-    """
-    normalized = normalize_text(text)
-
-    patterns = [
-        (
-            r"Код\s+и\s+наименование\s+налогового\s+органа\s*:"
-            r"\s*(\d{3,4})\s*-"
-        ),
-        (
-            r"206\s+Код\s+и\s+наименование\s+налогового\s+органа"
-            r"\s*:\s*(\d{3,4})"
-        ),
-        (
-            r"налогового\s+органа\s*:\s*(\d{3,4})\s*-"
-        )
-    ]
-
-    for pattern in patterns:
-        match = re.search(
-            pattern,
-            normalized,
-            re.IGNORECASE | re.DOTALL
-        )
-
-        if match:
-            return match.group(1).zfill(3)
-
-    return ""
-
-
-# ============================================================
 # ДАТА ОФОРМЛЕНИЯ
 # ============================================================
 
 def extract_issue_date(text: str) -> str:
-    """
-    Извлекает дату оформления из поля 103.
-
-    Обрабатывает как нормальную дату,
-    так и отдельно распознанные цифры:
-    0 3 0 8 2 0 2 6
-    """
     normalized = normalize_text(text)
 
     marker = re.search(
-        r"103\s+Дата\s+оформления",
+        r"103\s+Дата\s+оформления\s*:?",
         normalized,
         re.IGNORECASE
     )
@@ -672,19 +424,18 @@ def extract_issue_date(text: str) -> str:
             marker.end():marker.end() + 350
         ]
 
-        normal_match = re.search(
+        normal_date = re.search(
             r"\b(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})\b",
             fragment
         )
 
-        if normal_match:
+        if normal_date:
             return normalize_date(
-                normal_match.group(1),
-                normal_match.group(2),
-                normal_match.group(3)
+                normal_date.group(1),
+                normal_date.group(2),
+                normal_date.group(3)
             )
 
-        # Ограничиваем участок началом поля поставщика.
         fragment = re.split(
             r"201\s+Поставщик",
             fragment,
@@ -694,42 +445,571 @@ def extract_issue_date(text: str) -> str:
 
         digits = re.findall(r"\d", fragment)
 
-        # Проверяем все последовательности из восьми цифр,
-        # а не только первые восемь.
-        for index in range(
-            max(0, len(digits) - 7)
-        ):
-            date_digits = "".join(
-                digits[index:index + 8]
+        for start in range(max(0, len(digits) - 7)):
+            candidate = "".join(
+                digits[start:start + 8]
             )
 
-            date_value = normalize_date(
-                date_digits[0:2],
-                date_digits[2:4],
-                date_digits[4:8]
+            result = normalize_date(
+                candidate[0:2],
+                candidate[2:4],
+                candidate[4:8]
             )
 
-            if date_value:
-                return date_value
+            if result:
+                return result
 
-    # Резерв: первая подходящая дата рядом
-    # с верхней частью документа.
-    top_fragment = normalized[:1000]
+    return ""
 
-    date_candidates = re.findall(
-        r"\b(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})\b",
-        top_fragment
+
+# ============================================================
+# ИНН ПОСТАВЩИКА
+# ============================================================
+
+def is_valid_supplier_inn(value: str) -> bool:
+    """
+    Основной стандарт — 14 цифр.
+
+    Другие длины не принимаются автоматически,
+    чтобы не подставить номер счёта или ИНН покупателя.
+    """
+    inn = digits_only(value)
+
+    return (
+        len(inn) == 14
+        and inn != "00000000000000"
     )
 
-    for day, month, year in date_candidates:
-        date_value = normalize_date(
-            day,
-            month,
-            year
+
+def extract_supplier_inn_from_coordinates(
+    page_info
+) -> tuple[str, str]:
+    """
+    Извлекает ИНН из строки 201 по координатам.
+
+    Поддерживает:
+    - 03004202410293 одним текстом;
+    - 0 3 0 0 4 2 ... отдельными цифрами;
+    - цифры в отдельных квадратных полях.
+    """
+    if not page_info:
+        return "", ""
+
+    words = page_info["words"]
+    width = page_info["width"]
+
+    code_201 = find_code_word(
+        words,
+        "201",
+        left_half_only=True,
+        page_width=width
+    )
+
+    code_202 = find_code_word(
+        words,
+        "202",
+        left_half_only=True,
+        page_width=width
+    )
+
+    if not code_201:
+        return "", ""
+
+    row_top = get_word_top(code_201) - 5
+
+    if code_202:
+        row_bottom = get_word_top(code_202) - 1
+    else:
+        row_bottom = get_word_bottom(code_201) + 25
+
+    row_words = words_in_rectangle(
+        words,
+        x0=get_word_x1(code_201),
+        x1=width * 0.55,
+        top=row_top,
+        bottom=row_bottom
+    )
+
+    # На случай обычного цельного ИНН.
+    row_text = " ".join(
+        get_word_text(word)
+        for word in sorted(
+            row_words,
+            key=get_word_x0
+        )
+    )
+
+    normal_candidates = re.findall(
+        r"(?<!\d)\d{14}(?!\d)",
+        row_text
+    )
+
+    for candidate in normal_candidates:
+        if is_valid_supplier_inn(candidate):
+            return candidate, "ИНН найден в поле 201 по координатам"
+
+    # Для цифр, расположенных по одной в ячейках.
+    digit_tokens = []
+
+    for word in sorted(row_words, key=get_word_x0):
+        token = digits_only(get_word_text(word))
+
+        if not token:
+            continue
+
+        # Исключаем сам номер поля и случайные длинные значения.
+        if token == "201":
+            continue
+
+        if len(token) == 1:
+            digit_tokens.append(token)
+
+        elif len(token) == 14:
+            if is_valid_supplier_inn(token):
+                return token, "ИНН найден целым значением в поле 201"
+
+        elif 2 <= len(token) <= 13:
+            # Иногда pdfplumber объединяет несколько соседних ячеек.
+            digit_tokens.extend(list(token))
+
+    # Метка "Поставщик ИНН" может содержать цифр не должна.
+    # Берём любую последовательность из 14 цифр.
+    joined_digits = "".join(digit_tokens)
+
+    for start in range(max(0, len(joined_digits) - 13)):
+        candidate = joined_digits[start:start + 14]
+
+        if is_valid_supplier_inn(candidate):
+            return candidate, "ИНН собран из отдельных квадратных полей"
+
+    return "", ""
+
+
+def extract_supplier_inn_from_text(
+    ordinary_text: str,
+    layout_text: str
+) -> tuple[str, str]:
+    """Резервное извлечение ИНН из текста."""
+    combined = normalize_text(
+        ordinary_text + "\n" + layout_text
+    )
+
+    patterns = [
+        r"201\s+Поставщик\s+ИНН\s*:\s*(\d{14})",
+
+        r"201\s+Поставщик\s+ИНН\s*:\s*"
+        r"((?:\d[\s|]*){14})",
+
+        r"\bПоставщик\s+ИНН\s*:?\s*"
+        r"((?:\d[\s|]*){14})"
+    ]
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            combined,
+            re.IGNORECASE
         )
 
-        if date_value:
-            return date_value
+        if not match:
+            continue
+
+        candidate = digits_only(match.group(1))
+
+        if is_valid_supplier_inn(candidate):
+            return candidate, "ИНН найден по тексту поля 201"
+
+    # Ищем участок поставщика до поля покупателя.
+    supplier_marker = re.search(
+        r"(?:201\s*)?Поставщик\s+ИНН",
+        combined,
+        re.IGNORECASE
+    )
+
+    if supplier_marker:
+        fragment = combined[
+            supplier_marker.end():
+            supplier_marker.end() + 350
+        ]
+
+        fragment = re.split(
+            r"301\s+Покупатель\s+ИНН",
+            fragment,
+            maxsplit=1,
+            flags=re.IGNORECASE
+        )[0]
+
+        # Цельные 14 цифр.
+        candidates = re.findall(
+            r"(?<!\d)\d{14}(?!\d)",
+            fragment
+        )
+
+        for candidate in candidates:
+            if is_valid_supplier_inn(candidate):
+                return candidate, "ИНН найден в разделе поставщика"
+
+        # Раздельные цифры.
+        digit_tokens = re.findall(r"\d", fragment)
+
+        for start in range(max(0, len(digit_tokens) - 13)):
+            candidate = "".join(
+                digit_tokens[start:start + 14]
+            )
+
+            if is_valid_supplier_inn(candidate):
+                return candidate, "ИНН собран из раздельных цифр текста"
+
+    return "", "ИНН поставщика не найден"
+
+
+def extract_supplier_inn(
+    ordinary_text: str,
+    layout_text: str,
+    page_info
+) -> tuple[str, str]:
+    """
+    Координатный поиск имеет приоритет,
+    потому что он не смешивает поставщика и покупателя.
+    """
+    inn, status = extract_supplier_inn_from_coordinates(
+        page_info
+    )
+
+    if inn:
+        return inn, status
+
+    return extract_supplier_inn_from_text(
+        ordinary_text,
+        layout_text
+    )
+
+
+# ============================================================
+# НАИМЕНОВАНИЕ ПОСТАВЩИКА
+# ============================================================
+
+def simplify_organization_name(value: str) -> str:
+    value = clean_spaces(value)
+
+    replacements = [
+        (
+            r"^Общество\s+с\s+ограниченной\s+"
+            r"ответственностью\s*",
+            "ООО "
+        ),
+        (
+            r"^Закрытое\s+акционерное\s+общество\s*",
+            "ЗАО "
+        ),
+        (
+            r"^Открытое\s+акционерное\s+общество\s*",
+            "ОАО "
+        ),
+        (
+            r"^Индивидуальный\s+предприниматель\s*",
+            "ИП "
+        )
+    ]
+
+    for pattern, replacement in replacements:
+        value = re.sub(
+            pattern,
+            replacement,
+            value,
+            flags=re.IGNORECASE
+        )
+
+    return clean_spaces(value)
+
+
+def extract_supplier_name_from_coordinates(
+    page_info
+) -> str:
+    """
+    Извлекает всё содержимое строки 202 до строки 203.
+
+    Поэтому поддерживаются названия на двух и более строках.
+    """
+    if not page_info:
+        return ""
+
+    words = page_info["words"]
+    width = page_info["width"]
+
+    code_202 = find_code_word(
+        words,
+        "202",
+        left_half_only=True,
+        page_width=width
+    )
+
+    code_203 = find_code_word(
+        words,
+        "203",
+        left_half_only=True,
+        page_width=width
+    )
+
+    if not code_202:
+        return ""
+
+    top = get_word_top(code_202) - 4
+
+    if code_203:
+        bottom = get_word_top(code_203) - 1
+    else:
+        bottom = get_word_bottom(code_202) + 60
+
+    row_words = words_in_rectangle(
+        words,
+        x0=get_word_x1(code_202),
+        x1=width * 0.55,
+        top=top,
+        bottom=bottom
+    )
+
+    # Удаляем элементы правой колонки и служебные коды.
+    filtered = []
+
+    label_words = {
+        "ф.и.о.",
+        "фио",
+        "ип/наименование",
+        "организации:",
+        "организации",
+        "наименование"
+    }
+
+    for word in row_words:
+        text = get_word_text(word)
+        lower = text.lower()
+
+        if digits_only(text) in {"202", "302", "203", "303"}:
+            continue
+
+        if lower in label_words:
+            continue
+
+        filtered.append(word)
+
+    result = join_words_preserving_lines(filtered)
+    result = remove_field_labels(result)
+
+    # Иногда слова подписи не разделились на отдельные токены.
+    result = re.sub(
+        r"^.*?Наименование\s+организации\s*:\s*",
+        "",
+        result,
+        flags=re.IGNORECASE
+    )
+
+    return simplify_organization_name(result)
+
+
+def extract_supplier_name_from_text(text: str) -> str:
+    """
+    Резервный текстовый поиск.
+
+    DOTALL специально позволяет захватывать вторую строку.
+    """
+    normalized = normalize_text(text)
+
+    patterns = [
+        (
+            r"202\s+Ф\.?\s*И\.?\s*О\.?\s*ИП\s*/\s*"
+            r"Наименование\s+организации\s*:\s*"
+            r"(.+?)"
+            r"(?=\s+203\b|\s+303\b|\s+204\b)"
+        ),
+        (
+            r"Ф\.?\s*И\.?\s*О\.?\s*ИП\s*/\s*"
+            r"Наименование\s+организации\s*:\s*"
+            r"(.+?)"
+            r"(?=\s+202\b|\s+302\b|\s+203\b|"
+            r"\s+Филиал\s+поставщика)"
+        )
+    ]
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            normalized,
+            re.IGNORECASE | re.DOTALL
+        )
+
+        if not match:
+            continue
+
+        result = clean_spaces(match.group(1))
+
+        # Обрезаем всё, что относится к правой колонке покупателя.
+        result = re.split(
+            r"\b302\b|Ф\.?\s*И\.?\s*О\.?\s*ИП\s*/\s*"
+            r"Наименование\s+организации\s*:",
+            result,
+            maxsplit=1,
+            flags=re.IGNORECASE
+        )[0]
+
+        result = clean_spaces(result)
+
+        if result:
+            return simplify_organization_name(result)
+
+    return ""
+
+
+def extract_supplier_name(
+    ordinary_text: str,
+    layout_text: str,
+    page_info
+) -> str:
+    result = extract_supplier_name_from_coordinates(
+        page_info
+    )
+
+    if result:
+        return result
+
+    result = extract_supplier_name_from_text(
+        ordinary_text
+    )
+
+    if result:
+        return result
+
+    return extract_supplier_name_from_text(
+        layout_text
+    )
+
+
+# ============================================================
+# КОД НАЛОГОВОГО ОРГАНА
+# ============================================================
+
+def extract_tax_code_from_coordinates(page_info) -> str:
+    """
+    Извлекает первые три цифры из строки 206 поставщика.
+
+    Работает и для:
+    004 - УГНС...
+    и для отдельных клеток:
+    9 9 9 УККН...
+    """
+    if not page_info:
+        return ""
+
+    words = page_info["words"]
+    width = page_info["width"]
+
+    code_206 = find_code_word(
+        words,
+        "206",
+        left_half_only=True,
+        page_width=width
+    )
+
+    code_207 = find_code_word(
+        words,
+        "207",
+        left_half_only=True,
+        page_width=width
+    )
+
+    if not code_206:
+        return ""
+
+    top = get_word_top(code_206) - 4
+
+    if code_207:
+        bottom = get_word_top(code_207) - 1
+    else:
+        bottom = get_word_bottom(code_206) + 30
+
+    row_words = words_in_rectangle(
+        words,
+        x0=get_word_x1(code_206),
+        x1=width * 0.55,
+        top=top,
+        bottom=bottom
+    )
+
+    # Сначала цельный код 004 или 999.
+    text = " ".join(
+        get_word_text(word)
+        for word in sorted(row_words, key=get_word_x0)
+    )
+
+    normal_match = re.search(
+        r"(?<!\d)(\d{3})(?!\d)",
+        text
+    )
+
+    if normal_match:
+        return normal_match.group(1)
+
+    # Затем отдельные цифры в ячейках.
+    digits = []
+
+    for word in sorted(row_words, key=get_word_x0):
+        token = digits_only(get_word_text(word))
+
+        if len(token) == 1:
+            digits.append(token)
+
+        elif len(token) == 3:
+            return token
+
+    if len(digits) >= 3:
+        return "".join(digits[:3])
+
+    return ""
+
+
+def extract_tax_office_code(
+    ordinary_text: str,
+    layout_text: str,
+    page_info
+) -> str:
+    code = extract_tax_code_from_coordinates(
+        page_info
+    )
+
+    if code:
+        return code.zfill(3)
+
+    combined = normalize_text(
+        ordinary_text + "\n" + layout_text
+    )
+
+    patterns = [
+        (
+            r"Код\s+и\s+наименование\s+налогового\s+органа\s*:"
+            r"\s*(\d{3})\s*-"
+        ),
+        (
+            r"206.*?налогового\s+органа\s*:"
+            r"\s*((?:\d\s*){3})"
+        ),
+        (
+            r"(?<!\d)(\d\s+\d\s+\d)"
+            r"\s+(?:УГНС|УККН)"
+        )
+    ]
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            combined,
+            re.IGNORECASE | re.DOTALL
+        )
+
+        if match:
+            candidate = digits_only(match.group(1))
+
+            if len(candidate) == 3:
+                return candidate
 
     return ""
 
@@ -740,18 +1020,15 @@ def extract_issue_date(text: str) -> str:
 
 def extract_vat_from_total(text: str):
     """
-    Из строки «Итого по счету-фактуре»
-    извлекает сумму НДС.
+    Поддерживает оба варианта:
 
-    Структура итоговой строки:
-    1 — стоимость без НДС;
-    2 — сумма НДС;
-    3 — сумма НсП;
-    4 — общая стоимость.
+    41777.35 5013.28 2088.87 48879.50
+
+    3183.37 X 382.00 X 31.83 3597.20 X
     """
     normalized = normalize_text(text)
 
-    marker_patterns = [
+    markers = [
         r"Итого\s+по\s+счету\s*-\s*фактуре\s*:",
         r"Итого\s+по\s+счету-фактуре\s*:",
         r"Итого\s+по\s+счетуфактуре\s*:"
@@ -759,7 +1036,7 @@ def extract_vat_from_total(text: str):
 
     marker = None
 
-    for pattern in marker_patterns:
+    for pattern in markers:
         marker = re.search(
             pattern,
             normalized,
@@ -773,26 +1050,28 @@ def extract_vat_from_total(text: str):
         return None
 
     fragment = normalized[
-        marker.end():marker.end() + 400
+        marker.end():marker.end() + 300
     ]
 
-    numbers = re.findall(
+    values = re.findall(
         r"(?<!\d)"
         r"\d[\d \u00a0]*[.,]\d{2,5}"
         r"(?!\d)",
         fragment
     )
 
-    parsed_numbers = []
+    parsed = []
 
-    for number in numbers:
-        decimal_value = parse_decimal(number)
+    for value in values:
+        number = parse_decimal(value)
 
-        if decimal_value is not None:
-            parsed_numbers.append(decimal_value)
+        if number is not None:
+            parsed.append(number)
 
-    if len(parsed_numbers) >= 2:
-        return parsed_numbers[1]
+    # Первое число — сумма без НДС.
+    # Второе число — сумма НДС.
+    if len(parsed) >= 2:
+        return parsed[1]
 
     return None
 
@@ -802,108 +1081,76 @@ def extract_vat_from_total(text: str):
 # ============================================================
 
 def process_pdf(pdf_path: Path) -> dict:
-    """
-    Обрабатывает один PDF.
-    """
-    ordinary_text, layout_text = extract_pdf_text(
+    ordinary_text, layout_text, page_info = extract_pdf_data(
         pdf_path
     )
 
-    if (
-        not ordinary_text.strip()
-        and not layout_text.strip()
-    ):
+    if not ordinary_text.strip() and not layout_text.strip():
         raise ValueError(
             "PDF не содержит извлекаемого текста"
         )
 
-    combined_text = (
-        ordinary_text
-        + "\n"
-        + layout_text
-    )
+    combined_text = ordinary_text + "\n" + layout_text
 
     supplier_inn, inn_status = extract_supplier_inn(
         ordinary_text,
         layout_text,
-        pdf_path
+        page_info
+    )
+
+    supplier = extract_supplier_name(
+        ordinary_text,
+        layout_text,
+        page_info
+    )
+
+    tax_code = extract_tax_office_code(
+        ordinary_text,
+        layout_text,
+        page_info
     )
 
     invoice_number = extract_invoice_number(
         combined_text
     )
 
-    supplier = extract_supplier_name(
-        ordinary_text
-    )
-
-    if not supplier:
-        supplier = extract_supplier_name(
-            layout_text
-        )
-
-    tax_office_code = extract_tax_office_code(
-        ordinary_text
-    )
-
-    if not tax_office_code:
-        tax_office_code = extract_tax_office_code(
-            layout_text
-        )
-
     issue_date = extract_issue_date(
-        ordinary_text
+        combined_text
     )
-
-    if not issue_date:
-        issue_date = extract_issue_date(
-            layout_text
-        )
 
     vat = extract_vat_from_total(
         combined_text
     )
 
-    missing_fields = []
+    missing = []
 
     if not supplier:
-        missing_fields.append(
-            "наименование поставщика"
-        )
+        missing.append("наименование поставщика")
 
     if not supplier_inn:
-        missing_fields.append(
-            "ИНН поставщика"
-        )
+        missing.append("ИНН поставщика")
 
-    if not tax_office_code:
-        missing_fields.append(
-            "код налогового органа"
-        )
+    if not tax_code:
+        missing.append("код налогового органа")
 
     if not invoice_number:
-        missing_fields.append(
-            "номер счета-фактуры"
-        )
+        missing.append("номер СФ")
 
     if not issue_date:
-        missing_fields.append(
-            "дата"
-        )
+        missing.append("дата")
 
     if vat is None:
-        missing_fields.append(
-            "сумма НДС"
-        )
+        missing.append("сумма НДС")
 
-    if missing_fields:
-        validation_status = (
+    if missing:
+        status = (
             "Не найдено: "
-            + ", ".join(missing_fields)
-            + f". {inn_status}"
+            + ", ".join(missing)
+            + ". "
+            + inn_status
         )
     else:
-        validation_status = (
+        status = (
             "Все поля найдены. "
             + inn_status
         )
@@ -912,52 +1159,46 @@ def process_pdf(pdf_path: Path) -> dict:
         "source_file": pdf_path.name,
         "supplier": supplier,
         "supplier_inn": supplier_inn,
-        "tax_office_code": tax_office_code,
+        "tax_office_code": tax_code,
         "invoice_number": invoice_number,
         "issue_date": issue_date,
         "vat": vat,
-        "validation_status": validation_status,
-        "is_complete": len(missing_fields) == 0
+        "status": status,
+        "is_complete": len(missing) == 0
     }
 
 
 # ============================================================
-# EXCEL
+# СОЗДАНИЕ EXCEL
 # ============================================================
-
-def create_thin_border() -> Border:
-    """
-    Создаёт тонкие границы ячеек.
-    """
-    side = Side(
-        style="thin",
-        color="000000"
-    )
-
-    return Border(
-        left=side,
-        right=side,
-        top=side,
-        bottom=side
-    )
-
 
 def save_excel(
     rows: list[dict],
     errors: list[dict],
     output_path: Path
 ):
-    """
-    Создаёт Result.xlsx по структуре VAAT.
-    """
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "НДС"
 
-    # --------------------------------------------------------
-    # ЗАГОЛОВОК
-    # --------------------------------------------------------
+    border = create_border()
 
+    header_fill = PatternFill(
+        fill_type="solid",
+        fgColor="D9EAF7"
+    )
+
+    warning_fill = PatternFill(
+        fill_type="solid",
+        fgColor="FFF2CC"
+    )
+
+    error_fill = PatternFill(
+        fill_type="solid",
+        fgColor="F4CCCC"
+    )
+
+    # Заголовок VAAT
     sheet.merge_cells("A1:A2")
     sheet.merge_cells("B1:B2")
     sheet.merge_cells("C1:C2")
@@ -977,30 +1218,12 @@ def save_excel(
     sheet["F2"] = "дата"
     sheet["G2"] = "сумма НДС (сом.)"
 
-    # Третья строка — номера граф.
-    for column_number in range(1, 8):
+    for column in range(1, 8):
         sheet.cell(
             row=3,
-            column=column_number,
-            value=column_number
+            column=column,
+            value=column
         )
-
-    header_fill = PatternFill(
-        fill_type="solid",
-        fgColor="D9EAF7"
-    )
-
-    warning_fill = PatternFill(
-        fill_type="solid",
-        fgColor="FFF2CC"
-    )
-
-    error_fill = PatternFill(
-        fill_type="solid",
-        fgColor="F4CCCC"
-    )
-
-    border = create_thin_border()
 
     for row_cells in sheet.iter_rows(
         min_row=1,
@@ -1018,31 +1241,28 @@ def save_excel(
                 wrap_text=True
             )
 
-    # --------------------------------------------------------
-    # ДАННЫЕ
-    # --------------------------------------------------------
-
-    for index, row in enumerate(rows, start=1):
-        excel_row = sheet.max_row + 1
-
+    # Данные
+    for index, item in enumerate(rows, start=1):
         sheet.append([
             index,
-            row["supplier"],
-            row["supplier_inn"],
-            row["tax_office_code"],
-            row["invoice_number"],
-            row["issue_date"],
+            item["supplier"],
+            item["supplier_inn"],
+            item["tax_office_code"],
+            item["invoice_number"],
+            item["issue_date"],
             (
-                float(row["vat"])
-                if row["vat"] is not None
+                float(item["vat"])
+                if item["vat"] is not None
                 else None
             )
         ])
 
-        for column_number in range(1, 8):
+        excel_row = sheet.max_row
+
+        for column in range(1, 8):
             cell = sheet.cell(
                 row=excel_row,
-                column=column_number
+                column=column
             )
 
             cell.border = border
@@ -1051,76 +1271,31 @@ def save_excel(
                 wrap_text=True
             )
 
-        sheet.cell(
-            row=excel_row,
-            column=1
-        ).alignment = Alignment(
-            horizontal="center",
-            vertical="center"
-        )
+            if not item["is_complete"]:
+                cell.fill = warning_fill
 
-        # Текстовый формат обязателен:
-        # ведущие нули ИНН и кодов сохраняются.
-        sheet.cell(
-            row=excel_row,
-            column=3
-        ).number_format = "@"
-
-        sheet.cell(
-            row=excel_row,
-            column=4
-        ).number_format = "@"
-
-        sheet.cell(
-            row=excel_row,
-            column=5
-        ).number_format = "@"
-
-        sheet.cell(
-            row=excel_row,
-            column=6
-        ).number_format = "@"
+        # Текстовый формат сохраняет ведущие нули.
+        for column in (3, 4, 5, 6):
+            sheet.cell(
+                row=excel_row,
+                column=column
+            ).number_format = "@"
 
         sheet.cell(
             row=excel_row,
             column=7
         ).number_format = '#,##0.00'
 
-        # Если ИНН отсутствует — выделяем его красным.
-        if not row["supplier_inn"]:
-            sheet.cell(
+        if not item["supplier_inn"]:
+            inn_cell = sheet.cell(
                 row=excel_row,
                 column=3
-            ).fill = error_fill
+            )
 
-            sheet.cell(
-                row=excel_row,
-                column=3
-            ).value = "НЕ НАЙДЕН"
+            inn_cell.value = "НЕ НАЙДЕН"
+            inn_cell.fill = error_fill
 
-        elif len(row["supplier_inn"]) != 14:
-            # Допускаем нестандартный ИНН,
-            # но выделяем для ручной проверки.
-            sheet.cell(
-                row=excel_row,
-                column=3
-            ).fill = warning_fill
-
-        # Незавершённые строки выделяем жёлтым.
-        if not row["is_complete"]:
-            for column_number in range(1, 8):
-                cell = sheet.cell(
-                    row=excel_row,
-                    column=column_number
-                )
-
-                if cell.fill.fill_type is None:
-                    cell.fill = warning_fill
-
-    # --------------------------------------------------------
-    # ИТОГО
-    # --------------------------------------------------------
-
+    # Итог
     total_row = sheet.max_row + 1
 
     sheet.merge_cells(
@@ -1136,21 +1311,28 @@ def save_excel(
         value="Итого"
     )
 
-    sheet.cell(
-        row=total_row,
-        column=7,
-        value=f"=SUM(G4:G{total_row - 1})"
-    )
+    if total_row > 4:
+        sheet.cell(
+            row=total_row,
+            column=7,
+            value=f"=SUM(G4:G{total_row - 1})"
+        )
+    else:
+        sheet.cell(
+            row=total_row,
+            column=7,
+            value=0
+        )
 
-    for column_number in range(1, 8):
+    for column in range(1, 8):
         cell = sheet.cell(
             row=total_row,
-            column=column_number
+            column=column
         )
 
         cell.font = Font(bold=True)
-        cell.border = border
         cell.fill = header_fill
+        cell.border = border
         cell.alignment = Alignment(
             horizontal="center",
             vertical="center"
@@ -1161,17 +1343,13 @@ def save_excel(
         column=7
     ).number_format = '#,##0.00'
 
-    # --------------------------------------------------------
-    # РАЗМЕРЫ И ПЕЧАТЬ
-    # --------------------------------------------------------
-
     widths = {
         "A": 7,
-        "B": 48,
+        "B": 50,
         "C": 20,
-        "D": 22,
-        "E": 28,
-        "F": 15,
+        "D": 23,
+        "E": 29,
+        "F": 16,
         "G": 20
     }
 
@@ -1180,36 +1358,27 @@ def save_excel(
             column_letter
         ].width = width
 
-    sheet.row_dimensions[1].height = 38
+    sheet.row_dimensions[1].height = 40
     sheet.row_dimensions[2].height = 27
     sheet.row_dimensions[3].height = 22
 
     sheet.freeze_panes = "A4"
-    sheet.auto_filter.ref = (
-        f"A3:G{total_row - 1}"
-    )
+    sheet.auto_filter.ref = f"A3:G{total_row - 1}"
+    sheet.sheet_view.showGridLines = False
 
     sheet.page_setup.orientation = "landscape"
     sheet.page_setup.fitToWidth = 1
     sheet.page_setup.fitToHeight = 0
 
-    sheet.print_title_rows = "1:3"
-    sheet.sheet_view.showGridLines = False
-
-    # --------------------------------------------------------
-    # ЛИСТ ПРОВЕРКИ
-    # --------------------------------------------------------
-
-    check_sheet = workbook.create_sheet(
-        "Проверка"
-    )
+    # Лист проверки
+    check_sheet = workbook.create_sheet("Проверка")
 
     check_headers = [
         "Файл PDF",
         "Наименование поставщика",
-        "ИНН поставщика",
+        "ИНН",
         "Код налогового органа",
-        "Номер счета-фактуры",
+        "Номер СФ",
         "Дата",
         "Сумма НДС",
         "Результат проверки"
@@ -1227,28 +1396,28 @@ def save_excel(
             wrap_text=True
         )
 
-    for row in rows:
+    for item in rows:
         check_sheet.append([
-            row["source_file"],
-            row["supplier"],
-            row["supplier_inn"],
-            row["tax_office_code"],
-            row["invoice_number"],
-            row["issue_date"],
+            item["source_file"],
+            item["supplier"],
+            item["supplier_inn"],
+            item["tax_office_code"],
+            item["invoice_number"],
+            item["issue_date"],
             (
-                float(row["vat"])
-                if row["vat"] is not None
+                float(item["vat"])
+                if item["vat"] is not None
                 else None
             ),
-            row["validation_status"]
+            item["status"]
         ])
 
         current_row = check_sheet.max_row
 
-        for column_number in range(1, 9):
+        for column in range(1, 9):
             cell = check_sheet.cell(
                 row=current_row,
-                column=column_number
+                column=column
             )
 
             cell.border = border
@@ -1257,7 +1426,7 @@ def save_excel(
                 wrap_text=True
             )
 
-            if not row["is_complete"]:
+            if not item["is_complete"]:
                 cell.fill = warning_fill
 
         check_sheet.cell(
@@ -1281,12 +1450,12 @@ def save_excel(
         ).number_format = '#,##0.00'
 
     check_widths = {
-        "A": 42,
-        "B": 40,
+        "A": 43,
+        "B": 50,
         "C": 20,
-        "D": 22,
-        "E": 28,
-        "F": 15,
+        "D": 23,
+        "E": 29,
+        "F": 16,
         "G": 18,
         "H": 65
     }
@@ -1301,19 +1470,10 @@ def save_excel(
         f"A1:H{check_sheet.max_row}"
     )
 
-    # --------------------------------------------------------
-    # ОШИБКИ ОТКРЫТИЯ PDF
-    # --------------------------------------------------------
-
+    # Ошибки открытия
     if errors:
-        error_sheet = workbook.create_sheet(
-            "Ошибки"
-        )
-
-        error_sheet.append([
-            "Файл PDF",
-            "Ошибка"
-        ])
+        error_sheet = workbook.create_sheet("Ошибки")
+        error_sheet.append(["Файл PDF", "Ошибка"])
 
         for cell in error_sheet[1]:
             cell.font = Font(bold=True)
@@ -1326,48 +1486,131 @@ def save_excel(
                 error["error"]
             ])
 
-            current_row = error_sheet.max_row
-
-            for column_number in range(1, 3):
-                error_sheet.cell(
-                    row=current_row,
-                    column=column_number
-                ).border = border
-
-        error_sheet.column_dimensions[
-            "A"
-        ].width = 45
-
-        error_sheet.column_dimensions[
-            "B"
-        ].width = 90
-
-        error_sheet.freeze_panes = "A2"
+        error_sheet.column_dimensions["A"].width = 45
+        error_sheet.column_dimensions["B"].width = 90
 
     workbook.save(output_path)
+
+
+# ============================================================
+# ОКНО ПРОГРЕССА
+# ============================================================
+
+class ProgressWindow:
+    def __init__(self, root: Tk, total_files: int):
+        self.root = root
+        self.total_files = total_files
+        self.cancelled = BooleanVar(value=False)
+
+        self.window = Toplevel(root)
+        self.window.title("Извлечение данных из PDF")
+        self.window.geometry("560x210")
+        self.window.resizable(False, False)
+        self.window.protocol(
+            "WM_DELETE_WINDOW",
+            self.request_cancel
+        )
+
+        self.window.attributes("-topmost", True)
+
+        self.title_label = Label(
+            self.window,
+            text="Обработка счетов-фактур",
+            font=("Segoe UI", 14, "bold")
+        )
+        self.title_label.pack(pady=(18, 8))
+
+        self.file_text = StringVar(
+            value="Подготовка к обработке..."
+        )
+
+        self.file_label = Label(
+            self.window,
+            textvariable=self.file_text,
+            font=("Segoe UI", 9),
+            wraplength=510,
+            justify="center"
+        )
+        self.file_label.pack(pady=(0, 12))
+
+        self.progress = ttk.Progressbar(
+            self.window,
+            orient="horizontal",
+            mode="determinate",
+            maximum=max(total_files, 1),
+            length=500
+        )
+        self.progress.pack(pady=4)
+
+        self.counter_text = StringVar(
+            value=f"0 из {total_files}"
+        )
+
+        self.counter_label = Label(
+            self.window,
+            textvariable=self.counter_text,
+            font=("Segoe UI", 10)
+        )
+        self.counter_label.pack(pady=7)
+
+        self.cancel_button = Button(
+            self.window,
+            text="Отменить",
+            width=15,
+            command=self.request_cancel
+        )
+        self.cancel_button.pack(pady=4)
+
+        self.window.update_idletasks()
+
+    def request_cancel(self):
+        self.cancelled.set(True)
+        self.file_text.set(
+            "Отмена после завершения текущего файла..."
+        )
+        self.cancel_button.config(state="disabled")
+        self.window.update_idletasks()
+
+    def update(
+        self,
+        current: int,
+        filename: str
+    ):
+        self.progress["value"] = current
+        self.counter_text.set(
+            f"{current} из {self.total_files}"
+        )
+        self.file_text.set(
+            f"Обрабатывается:\n{filename}"
+        )
+
+        self.window.update_idletasks()
+        self.window.update()
+
+    def set_saving(self):
+        self.file_text.set(
+            "Формируется файл Result.xlsx..."
+        )
+        self.window.update_idletasks()
+        self.window.update()
+
+    def close(self):
+        try:
+            self.window.destroy()
+        except Exception:
+            pass
 
 
 # ============================================================
 # ИНТЕРФЕЙС
 # ============================================================
 
-def choose_folder(default_folder: Path):
-    """
-    Открывает окно выбора папки с PDF.
-    """
-    root = Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-
+def choose_folder(root: Tk, default_folder: Path):
     selected = filedialog.askdirectory(
-        title=(
-            "Выберите папку "
-            "с PDF-счетами-фактурами"
-        ),
+        parent=root,
+        title="Выберите папку с PDF-счетами-фактурами",
         initialdir=str(default_folder)
     )
-
-    root.destroy()
 
     if not selected:
         return None
@@ -1376,29 +1619,23 @@ def choose_folder(default_folder: Path):
 
 
 def show_message(
+    root: Tk,
     title: str,
     text: str,
     error: bool = False
 ):
-    """
-    Показывает сообщение пользователю.
-    """
-    root = Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-
     if error:
         messagebox.showerror(
             title,
-            text
+            text,
+            parent=root
         )
     else:
         messagebox.showinfo(
             title,
-            text
+            text,
+            parent=root
         )
-
-    root.destroy()
 
 
 # ============================================================
@@ -1406,39 +1643,66 @@ def show_message(
 # ============================================================
 
 def main():
-    app_dir = application_directory()
+    root = Tk()
+    root.withdraw()
 
     selected_folder = choose_folder(
-        app_dir
+        root,
+        application_directory()
     )
 
     if selected_folder is None:
+        root.destroy()
         return
 
-    # Обрабатываются PDF в выбранной папке.
+    # Поддерживаем .pdf и .PDF.
     pdf_files = sorted(
-        selected_folder.glob("*.pdf"),
+        [
+            path
+            for path in selected_folder.iterdir()
+            if (
+                path.is_file()
+                and path.suffix.lower() == ".pdf"
+            )
+        ],
         key=lambda path: path.name.lower()
     )
 
     if not pdf_files:
         show_message(
+            root,
             "PDF не найдены",
             "В выбранной папке нет PDF-файлов.",
             error=True
         )
+        root.destroy()
         return
+
+    progress_window = ProgressWindow(
+        root,
+        len(pdf_files)
+    )
 
     rows = []
     errors = []
+    processed_count = 0
 
-    for pdf_path in pdf_files:
+    for index, pdf_path in enumerate(
+        pdf_files,
+        start=1
+    ):
+        if progress_window.cancelled.get():
+            break
+
+        progress_window.update(
+            index - 1,
+            pdf_path.name
+        )
+
         try:
-            result = process_pdf(
-                pdf_path
+            rows.append(
+                process_pdf(pdf_path)
             )
-
-            rows.append(result)
 
         except Exception as exc:
             errors.append({
@@ -1446,10 +1710,21 @@ def main():
                 "error": str(exc)
             })
 
-    output_path = (
-        selected_folder
-        / "Result.xlsx"
-    )
+        processed_count += 1
+
+        progress_window.update(
+            index,
+            pdf_path.name
+        )
+
+    if processed_count == 0:
+        progress_window.close()
+        root.destroy()
+        return
+
+    progress_window.set_saving()
+
+    output_path = selected_folder / "Result.xlsx"
 
     try:
         save_excel(
@@ -1459,46 +1734,70 @@ def main():
         )
 
     except PermissionError:
+        progress_window.close()
+
         show_message(
-            "Не удалось сохранить Excel",
-            "Закройте файл Result.xlsx в Excel "
-            "и запустите программу повторно.",
+            root,
+            "Не удалось сохранить Result.xlsx",
+            "Файл Result.xlsx открыт в Excel.\n\n"
+            "Закройте его и запустите программу повторно.",
             error=True
         )
+
+        root.destroy()
         return
 
+    except Exception as exc:
+        progress_window.close()
+
+        show_message(
+            root,
+            "Ошибка сохранения",
+            f"Не удалось создать Result.xlsx:\n\n{exc}",
+            error=True
+        )
+
+        root.destroy()
+        return
+
+    progress_window.close()
+
     complete_count = sum(
-        1 for row in rows
+        1
+        for row in rows
         if row["is_complete"]
     )
 
     missing_inn_count = sum(
-        1 for row in rows
+        1
+        for row in rows
         if not row["supplier_inn"]
     )
 
-    vat_count = sum(
-        1 for row in rows
-        if row["vat"] is not None
-    )
+    cancelled_text = ""
 
-    message = (
-        f"Обработано PDF: {len(pdf_files)}\n"
-        f"Успешно открыто: {len(rows)}\n"
+    if processed_count < len(pdf_files):
+        cancelled_text = (
+            "\n\nОбработка была отменена пользователем."
+        )
+
+    result_message = (
+        f"Обработано PDF: {processed_count}\n"
         f"Все поля найдены: {complete_count}\n"
         f"ИНН поставщика не найден: "
         f"{missing_inn_count}\n"
-        f"Сумма НДС найдена: {vat_count}\n"
-        f"Ошибок открытия PDF: {len(errors)}\n\n"
-        f"Результат сохранён:\n"
-        f"{output_path}\n\n"
-        "Проверьте лист «Проверка»."
+        f"Ошибок открытия: {len(errors)}\n\n"
+        f"Результат:\n{output_path}"
+        f"{cancelled_text}"
     )
 
     show_message(
+        root,
         "Обработка завершена",
-        message
+        result_message
     )
+
+    root.destroy()
 
 
 if __name__ == "__main__":
@@ -1516,10 +1815,19 @@ if __name__ == "__main__":
             encoding="utf-8"
         )
 
-        show_message(
-            "Ошибка программы",
-            "Произошла непредвиденная ошибка.\n\n"
-            "Подробности сохранены в файле:\n"
-            f"{error_path}",
-            error=True
-        )
+        try:
+            error_root = Tk()
+            error_root.withdraw()
+
+            messagebox.showerror(
+                "Ошибка программы",
+                "Произошла непредвиденная ошибка.\n\n"
+                "Подробности записаны в файл:\n"
+                f"{error_path}",
+                parent=error_root
+            )
+
+            error_root.destroy()
+
+        except Exception:
+            pass
