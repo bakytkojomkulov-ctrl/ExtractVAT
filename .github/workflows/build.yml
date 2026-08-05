@@ -1,0 +1,40 @@
+name: Build Extract EXE
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Download project
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build Windows EXE
+        run: |
+          python -m PyInstaller `
+            --onefile `
+            --windowed `
+            --clean `
+            --name Extract `
+            --collect-all pdfplumber `
+            --collect-all pdfminer `
+            extract.py
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: Extract-Windows
+          path: dist/Extract.exe
+          if-no-files-found: error
