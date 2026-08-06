@@ -723,141 +723,367 @@ def simplify_organization_name(value: str) -> str:
     return clean_spaces(value)
 
 
+# ============================================================
+# НАИМЕНОВАНИЕ ПОСТАВЩИКА
+# ============================================================
+
+def simplify_organization_name(value: str) -> str:
+    """
+    Сокращает организационно-правовую форму,
+    сохраняя полное название организации.
+    """
+    value = clean_spaces(value)
+
+    replacements = [
+        (
+            r"^Общество\s+с\s+ограниченной\s+ответственностью\s*",
+            "ООО "
+        ),
+        (
+            r"^Закрытое\s+акционерное\s+общество\s*",
+            "ЗАО "
+        ),
+        (
+            r"^Открытое\s+акционерное\s+общество\s*",
+            "ОАО "
+        ),
+        (
+            r"^Муниципальное\s+предприятие\s*",
+            "МП "
+        ),
+        (
+            r"^Государственное\s+предприятие\s*",
+            "ГП "
+        ),
+        (
+            r"^Индивидуальный\s+предприниматель\s*",
+            "ИП "
+        )
+    ]
+
+    for pattern, replacement in replacements:
+        value = re.sub(
+            pattern,
+            replacement,
+            value,
+            flags=re.IGNORECASE
+        )
+
+    return clean_spaces(value)
+
+
+def find_supplier_column_right_edge(
+    words: list[dict],
+    page_width: float
+) -> float:
+    """
+    Определяет вертикальную границу между поставщиком
+    и покупателем.
+
+    Ищет коды правой колонки: 301, 302, 303, 304.
+    Это надёжнее, чем использовать половину ширины страницы.
+    """
+    possible_edges = []
+
+    for word in words:
+        text = digits_only(get_word_text(word))
+
+        if text not in {"301", "302", "303", "304", "305", "306"}:
+            continue
+
+        word_x0 = get_word_x0(word)
+
+        # Правая колонка обычно начинается после 45% страницы.
+        if word_x0 > page_width * 0.44:
+            possible_edges.append(word_x0)
+
+    if possible_edges:
+        return min(possible_edges) - 2
+
+    # Резервная граница.
+    return page_width * 0.52
+
+
 def extract_supplier_name_from_coordinates(
     page_info
 ) -> str:
     """
-    Извлекает всё содержимое строки 202 до строки 203.
+    Извлекает название поставщика, включая продолжение
+    на второй, третьей и последующих строках.
 
-    Поэтому поддерживаются названия на двух и более строках.
+    Чтение начинается со строки:
+    Ф.И.О. ИП/Наименование организации:
+
+    и заканчивается перед строкой:
+    Филиал поставщика ИНН
     """
     if not page_info:
         return ""
 
     words = page_info["words"]
-    width = page_info["width"]
+    page_width = page_info["width"]
 
-    code_202 = find_code_word(
+    supplier_right_edge = find_supplier_column_right_edge(
         words,
-        "202",
-        left_half_only=True,
-        page_width=width
+        page_width
     )
 
-    code_203 = find_code_word(
-        words,
-        "203",
-        left_half_only=True,
-        page_width=width
+    # Оставляем только левую колонку поставщика.
+    supplier_words = []
+
+    for word in words:
+        center_x = (
+            get_word_x0(word)
+            + get_word_x1(word)
+        ) / 2
+
+        if center_x < supplier_right_edge:
+            supplier_words.append(word)
+
+    lines = group_words_into_lines(
+        supplier_words,
+        tolerance=3.5
     )
 
-    if not code_202:
-        return ""
+    collecting = False
+    name_parts = []
 
-    top = get_word_top(code_202) - 4
+    for line in lines:
+        line_words = sorted(
+            line,
+            key=get_word_x0
+        )
 
-    if code_203:
-        bottom = get_word_top(code_203) - 1
-    else:
-        bottom = get_word_bottom(code_202) + 60
+        line_text = " ".join(
+            get_word_text(word)
+            for word in line_words
+            if get_word_text(word)
+        )
 
-    row_words = words_in_rectangle(
-        words,
-        x0=get_word_x1(code_202),
-        x1=width * 0.55,
-        top=top,
-        bottom=bottom
-    )
+        line_text = clean_spaces(line_text)
+        lower_text = line_text.lower()
 
-    # Удаляем элементы правой колонки и служебные коды.
-    filtered = []
-
-    label_words = {
-        "ф.и.о.",
-        "фио",
-        "ип/наименование",
-        "организации:",
-        "организации",
-        "наименование"
-    }
-
-    for word in row_words:
-        text = get_word_text(word)
-        lower = text.lower()
-
-        if digits_only(text) in {"202", "302", "203", "303"}:
+        if not line_text:
             continue
 
-        if lower in label_words:
+        if not collecting:
+            # Начало поля наименования организации.
+            is_name_field = (
+                "наименование" in lower_text
+                and "организац" in lower_text
+                and (
+                    "ф.и.о" in lower_text
+                    or "фио" in lower_text
+                    or "ип/" in lower_text
+                )
+            )
+
+            if not is_name_field:
+                continue
+
+            collecting = True
+
+            # Удаляем номер поля 202, в том числе вариант:
+            # 2 0 2
+            line_text = re.sub(
+                r"^\s*2\s*0\s*2\s*",
+                "",
+                line_text
+            )
+
+            # Берём всё после подписи
+            # «Наименование организации:».
+            match = re.search(
+                r"Наименование\s+организац(?:ии|ия)"
+                r"\s*:?\s*(.*)$",
+                line_text,
+                re.IGNORECASE
+            )
+
+            if match:
+                first_part = clean_spaces(
+                    match.group(1)
+                )
+
+                if first_part:
+                    name_parts.append(first_part)
+
             continue
 
-        filtered.append(word)
+        # Конец поля поставщика.
+        stop_markers = [
+            "филиал поставщика",
+            "наименование филиала",
+            "адрес (юридич",
+            "код и наименование налогового органа"
+        ]
 
-    result = join_words_preserving_lines(filtered)
-    result = remove_field_labels(result)
+        if any(
+            marker in lower_text
+            for marker in stop_markers
+        ):
+            break
 
-    # Иногда слова подписи не разделились на отдельные токены.
+        # Также останавливаемся на кодах следующих полей.
+        compact_digits = digits_only(line_text)
+
+        if compact_digits in {
+            "203",
+            "204",
+            "205",
+            "206"
+        }:
+            break
+
+        # Убираем случайно попавший номер поля.
+        continuation = re.sub(
+            r"^\s*2\s*0\s*[3-9]\s*",
+            "",
+            line_text
+        )
+
+        continuation = clean_spaces(continuation)
+
+        # Убираем код правой колонки, если он попал
+        # в конец строки.
+        continuation = re.sub(
+            r"\s+30[1-9]\s*$",
+            "",
+            continuation
+        )
+
+        continuation = clean_spaces(continuation)
+
+        if continuation:
+            name_parts.append(continuation)
+
+    result = clean_spaces(
+        " ".join(name_parts)
+    )
+
+    # Дополнительная очистка служебных кодов.
     result = re.sub(
-        r"^.*?Наименование\s+организации\s*:\s*",
+        r"^\s*202\s*",
         "",
-        result,
-        flags=re.IGNORECASE
+        result
     )
+
+    result = re.sub(
+        r"\s+30[1-9]\s*$",
+        "",
+        result
+    )
+
+    result = clean_spaces(result)
+
+    if not result:
+        return ""
 
     return simplify_organization_name(result)
 
 
-def extract_supplier_name_from_text(text: str) -> str:
+def extract_supplier_name_from_text(
+    text: str
+) -> str:
     """
-    Резервный текстовый поиск.
+    Резервный способ для PDF, где координаты слов
+    извлекаются некорректно.
 
-    DOTALL специально позволяет захватывать вторую строку.
+    Поддерживает перенос названия на несколько строк.
     """
-    normalized = normalize_text(text)
+    if not text:
+        return ""
 
-    patterns = [
-        (
-            r"202\s+Ф\.?\s*И\.?\s*О\.?\s*ИП\s*/\s*"
-            r"Наименование\s+организации\s*:\s*"
-            r"(.+?)"
-            r"(?=\s+203\b|\s+303\b|\s+204\b)"
-        ),
-        (
-            r"Ф\.?\s*И\.?\s*О\.?\s*ИП\s*/\s*"
-            r"Наименование\s+организации\s*:\s*"
-            r"(.+?)"
-            r"(?=\s+202\b|\s+302\b|\s+203\b|"
-            r"\s+Филиал\s+поставщика)"
-        )
-    ]
+    lines = text.splitlines()
 
-    for pattern in patterns:
-        match = re.search(
-            pattern,
-            normalized,
-            re.IGNORECASE | re.DOTALL
-        )
+    collecting = False
+    result_parts = []
 
-        if not match:
+    for original_line in lines:
+        line = clean_spaces(original_line)
+        lower_line = line.lower()
+
+        if not line:
             continue
 
-        result = clean_spaces(match.group(1))
+        if not collecting:
+            if (
+                "наименование" in lower_line
+                and "организац" in lower_line
+                and (
+                    "ф.и.о" in lower_line
+                    or "фио" in lower_line
+                    or "ип/" in lower_line
+                )
+            ):
+                collecting = True
 
-        # Обрезаем всё, что относится к правой колонке покупателя.
-        result = re.split(
-            r"\b302\b|Ф\.?\s*И\.?\s*О\.?\s*ИП\s*/\s*"
-            r"Наименование\s+организации\s*:",
-            result,
-            maxsplit=1,
-            flags=re.IGNORECASE
-        )[0]
+                # Левая часть до поля покупателя.
+                line = re.split(
+                    r"\b302\b",
+                    line,
+                    maxsplit=1
+                )[0]
 
-        result = clean_spaces(result)
+                match = re.search(
+                    r"Наименование\s+организац(?:ии|ия)"
+                    r"\s*:?\s*(.*)$",
+                    line,
+                    re.IGNORECASE
+                )
 
-        if result:
-            return simplify_organization_name(result)
+                if match:
+                    part = clean_spaces(
+                        match.group(1)
+                    )
 
-    return ""
+                    if part:
+                        result_parts.append(part)
+
+                continue
+
+        else:
+            # Прекращаем чтение возле следующего поля.
+            if (
+                "филиал поставщика" in lower_line
+                or "наименование филиала" in lower_line
+                or re.search(
+                    r"^\s*2\s*0\s*3\b",
+                    line
+                )
+                or re.search(
+                    r"^\s*203\b",
+                    line
+                )
+            ):
+                break
+
+            # Не захватываем правую колонку покупателя.
+            line = re.split(
+                r"\b302\b",
+                line,
+                maxsplit=1
+            )[0]
+
+            line = re.sub(
+                r"\s+30[1-9]\s*$",
+                "",
+                line
+            )
+
+            part = clean_spaces(line)
+
+            if part:
+                result_parts.append(part)
+
+    result = clean_spaces(
+        " ".join(result_parts)
+    )
+
+    if not result:
+        return ""
+
+    return simplify_organization_name(result)
 
 
 def extract_supplier_name(
@@ -865,6 +1091,10 @@ def extract_supplier_name(
     layout_text: str,
     page_info
 ) -> str:
+    """
+    Последовательно использует координаты,
+    обычный текст и layout-текст.
+    """
     result = extract_supplier_name_from_coordinates(
         page_info
     )
@@ -882,7 +1112,6 @@ def extract_supplier_name(
     return extract_supplier_name_from_text(
         layout_text
     )
-
 
 # ============================================================
 # КОД НАЛОГОВОГО ОРГАНА
