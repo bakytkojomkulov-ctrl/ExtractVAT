@@ -1467,7 +1467,9 @@ def save_excel(
     sheet["F2"] = "дата"
     sheet["G2"] = "сумма НДС (сом.)"
 
-    for column in range(1, 9):
+    # H1:H3 is merged for Payment Voucher#, so H3 is a MergedCell
+    # and cannot receive a value. Number the regular columns A:G only.
+    for column in range(1, 8):
         sheet.cell(
             row=3,
             column=column,
