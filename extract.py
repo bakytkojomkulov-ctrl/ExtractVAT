@@ -1318,7 +1318,7 @@ def extract_payment_voucher(pdf_path: Path) -> str:
     чтобы случайно не принять другой номер за ваучер.
     """
     stem = pdf_path.stem.strip()
-    match = re.match(r"^(\d+)-INV$", stem, re.IGNORECASE)
+    match = re.match(r"^(\d+)-INV(?:\s*\(\d+\))?$", stem, re.IGNORECASE)
     return match.group(1) if match else ""
 
 
